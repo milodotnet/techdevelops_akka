@@ -7,8 +7,10 @@ namespace classLib
 {
     using System.Collections.Generic;
     using System.Globalization;
+    using System.Linq;
     using System.Security;
     using System.Threading.Tasks;
+    using Akka.Persistence;
     using Microsoft.Azure.Documents;
     using Microsoft.Azure.Documents.Client;
     using Microsoft.Azure.Documents.Linq;
@@ -39,12 +41,10 @@ namespace classLib
 
         public PartitionActor(DocumentClient client){
             _client = client;
-            Receive<Message.ProcessPartition>(message => {
-                Log.Info($"started processing partition {message}");
-
+            Receive<Message.ProcessPartition>(message => {                
                 string continuation = message.ContinueFrom;
-                Dictionary<string, string> checkpoints = new Dictionary<string, string>();
-                checkpoints.TryGetValue(message.Id, out continuation);
+//                Dictionary<string, string> checkpoints = new Dictionary<string, string>();
+//                checkpoints.TryGetValue(message.Id, out continuation);
 
                 IDocumentQuery<Document> query = _client.CreateDocumentChangeFeedQuery(
                     message.CollectionUri,
@@ -59,22 +59,33 @@ namespace classLib
                     });
 
                 int numChangesRead = 0;
-                while (query.HasMoreResults)
+//                while (query.HasMoreResults)
+//                {
+                //Task.Delay(TimeSpan.FromMilliseconds(100)).GetAwaiter().GetResult();
+                FeedResponse<Document> readChangesResponse = query.ExecuteNextAsync<Document>().Result;
+                
+                foreach (Document changedDocument in readChangesResponse)
                 {
-                    Task.Delay(TimeSpan.FromMilliseconds(100)).GetAwaiter().GetResult();
-                    FeedResponse<Document> readChangesResponse = query.ExecuteNextAsync<Document>().Result;
-
-                    foreach (Document changedDocument in readChangesResponse)
-                    {
-                        Console.WriteLine("\tRead document {0} from the change feed.", changedDocument.Id);
-                        numChangesRead++;
-                    }
-
-                    checkpoints[message.Id] = readChangesResponse.ResponseContinuation;
+                    Console.WriteLine("\tRead document {0} from the change feed.", changedDocument.Id);
+                    numChangesRead++;
                 }
-                Console.WriteLine("Read {0} documents from the change feed", numChangesRead);
-                Task.Delay(TimeSpan.FromSeconds(3)).GetAwaiter().GetResult();
-                Self.Tell(new Message.ProcessPartition(message.Id, message.CollectionUri, continuation));
+
+//                    checkpoints[message.Id] = readChangesResponse.ResponseContinuation;
+                //}
+
+                if (readChangesResponse.ResponseContinuation == continuation)
+                {
+                    Console.WriteLine($"Nothing new, waiting at {message}");
+                    Task.Delay(TimeSpan.FromSeconds(10)).GetAwaiter().GetResult();
+                }
+                else
+                {
+                    Log.Info($"started processing partition {message}");
+                    Console.WriteLine("Read {0} documents from the change feed", numChangesRead);
+                }
+                //
+                //Self.Tell(new Message.ProcessPartition(message.Id, message.CollectionUri, continuation));
+                Context.Parent.Tell(new CheckpointPartition(message.Id, readChangesResponse.ResponseContinuation));
             });
             Receive<Die>(message => {
                 Log.Info($"Die Hard");
@@ -83,10 +94,30 @@ namespace classLib
         }
     }
 
-    public class PartitionRangeActor : ReceiveActor
+    public class CheckpointPartition
     {
-        private readonly DocumentClient _client;
+        public override string ToString()
+        {
+            return $"{nameof(PartitionId)}: {PartitionId}, {nameof(Checkpoint)}: {Checkpoint}";
+        }
+
+        public readonly string PartitionId;
+        public readonly string Checkpoint;
+
+        public CheckpointPartition(string partitionId, string checkpoint)
+        {
+            PartitionId = partitionId;
+            Checkpoint = checkpoint;
+        }
+    }
+
+    public class PartitionRangeActor : ReceivePersistentActor
+    {
+        private readonly Dictionary<string, string> _checkpoints = new Dictionary<string, string>();
+        private readonly Dictionary<string, IActorRef> _partitionActors = new Dictionary<string, IActorRef>();
         public ILoggingAdapter Log { get; } = Context.GetLogger();
+
+        public override string PersistenceId => "me";
 
         public static Props Props(DocumentClient client)
         {
@@ -95,20 +126,32 @@ namespace classLib
 
         public PartitionRangeActor(DocumentClient client)
         {
+            Uri collectionUri = UriFactory.CreateDocumentCollectionUri("CustomerReturn", "CustomerReturnEvents");
             if (client == null)
             {
                 Log.Info("Document Client Does Not Exist");
             }
-            _client = client;
-            Receive<Message.StartReadingPartitions>(message => {
+            Recover<CheckpointPartition>(message =>
+            {
+                _checkpoints[message.PartitionId] = message.Checkpoint;
+            });
+            Command<CheckpointPartition>(unpersistedMessage => Persist(unpersistedMessage,
+                (persistedMessage) =>
+                {
+                    var processPartition = new Message.ProcessPartition(persistedMessage.PartitionId, collectionUri, persistedMessage.Checkpoint);
+                    //Log.Info($"checkpointed, continuing {persistedMessage}");
+                    _partitionActors[persistedMessage.PartitionId].Tell(processPartition);                    
+                }));
+
+            Command<Message.StartReadingPartitions>(unpersistedMessage => Persist(unpersistedMessage, (persistedMessage) => {
                 //start polling to see which partitions exits, and when i find one, send the partition detected message
-                Uri collectionUri = UriFactory.CreateDocumentCollectionUri("CustomerReturn", "CustomerReturnEvents");
+                
                 string pkRangesResponseContinuation = null;
                 List<PartitionKeyRange> partitionKeyRanges = new List<PartitionKeyRange>();
 
                 do
                 {
-                    FeedResponse<PartitionKeyRange> pkRangesResponse = _client.ReadPartitionKeyRangeFeedAsync(
+                    FeedResponse<PartitionKeyRange> pkRangesResponse = client.ReadPartitionKeyRangeFeedAsync(
                         collectionUri,
                         new FeedOptions { RequestContinuation = pkRangesResponseContinuation })
                         .GetAwaiter()
@@ -125,10 +168,18 @@ namespace classLib
                     IActorRef actorRef = Context.ActorOf(
                         PartitionActor.Props(client),
                         $"partition-actor-{range.Id}");
-                    actorRef.Tell(new Message.ProcessPartition(range.Id, collectionUri, null));
-                    Log.Info($"Partition detected! {message}");
+                    _partitionActors.Add(range.Id, actorRef);
+                    if (_checkpoints.ContainsKey(range.Id))
+                    {
+                        actorRef.Tell(new Message.ProcessPartition(range.Id, collectionUri, _checkpoints[range.Id]));
+                    }
+                    else
+                    {
+                        actorRef.Tell(new Message.ProcessPartition(range.Id, collectionUri, null));
+                    }                    
+                    Log.Info($"Partition detected! {persistedMessage}");
                 });
-            });
+            }));
         }
     }
 

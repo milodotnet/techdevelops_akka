@@ -19,7 +19,7 @@
 
             public override string ToString()
             {
-                return Id;
+                return $"{nameof(Id)}: {Id}, {nameof(ContinueFrom)}: {ContinueFrom}, {nameof(CollectionUri)}: {CollectionUri}";
             }
         }
         public class StartReadingPartitions
