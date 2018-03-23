@@ -6,22 +6,6 @@ namespace classLib
 {
     using System.Globalization;
 
-    public class StartReadingPartitions {
-
-    }
-
-    public class Die
-    {
-
-    }
-
-    public class ProcessPartition {
-        public string Id {get;set;}
-        public override string ToString(){
-            return Id;
-        }
-    }
-
     public class PartitionActor : ReceiveActor 
     {
         public ILoggingAdapter Log { get; } = Context.GetLogger();
@@ -37,7 +21,7 @@ namespace classLib
         protected override void PostStop() => Log.Info("Et e brutus?");
 
         public PartitionActor(){
-            Receive<ProcessPartition>(message => {
+            Receive<Message.ProcessPartition>(message => {
                 Log.Info($"started processing partition {message}");
             });
             Receive<Die>(message => {
@@ -53,10 +37,10 @@ namespace classLib
         
         public PartitionRangeActor()
         {
-            Receive<StartReadingPartitions>(message => {
+            Receive<Message.StartReadingPartitions>(message => {
                 //start polling to see which partitions exits, and when i find one, send the partition detected message
                 var actorRef = Context.ActorOf<PartitionActor>($"partition-actor-1");
-                actorRef.Tell(new ProcessPartition { Id = "1" });
+                actorRef.Tell(new Message.ProcessPartition ("1"));
                 Log.Info($"Partition detected! {message}");                
             });
         }
@@ -68,7 +52,7 @@ namespace classLib
 
         protected override void PreStart() {
             IActorRef actorRef = Context.ActorOf<PartitionRangeActor>("partition-range");
-            actorRef.Tell(new StartReadingPartitions());
+            actorRef.Tell(new Message.StartReadingPartitions());
             Log.Info("Feed Processor Application started"); 
         }
 
