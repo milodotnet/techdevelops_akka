@@ -4,17 +4,15 @@ using Akka.Event;
 
 namespace classLib
 {
+    using System.Globalization;
 
     public class StartReadingPartitions {
 
     }
 
-    public class PartitionDetected {
-        public string Id {get;set;}
+    public class Die
+    {
 
-        public override string ToString(){
-            return Id;
-        }
     }
 
     public class ProcessPartition {
@@ -28,12 +26,12 @@ namespace classLib
     {
         public ILoggingAdapter Log { get; } = Context.GetLogger();
 
-        private DateTime startedAt;
+        private DateTime _startedAt;
 
         protected override void PreStart() {
             Log.Info("I Live!");
-            startedAt = DateTime.Now;
-            Log.Info(startedAt.ToString());
+            _startedAt = DateTime.Now;
+            Log.Info(_startedAt.ToString(CultureInfo.InvariantCulture));
         }
 
         protected override void PostStop() => Log.Info("Et e brutus?");
@@ -49,21 +47,17 @@ namespace classLib
         }
     }
 
-    public class Die{
-
-    }
-
     public class PartitionRangeActor : ReceiveActor
     {
         public ILoggingAdapter Log { get; } = Context.GetLogger();
-                    
-
+        
         public PartitionRangeActor()
         {
             Receive<StartReadingPartitions>(message => {
-                            //start polling to see which partitions exits, and when i find one, send the partition detected message
-               Context.Parent.Tell(new PartitionDetected {  Id = "1" });
-               Log.Info("Start processing");
+                //start polling to see which partitions exits, and when i find one, send the partition detected message
+                var actorRef = Context.ActorOf<PartitionActor>($"partition-actor-1");
+                actorRef.Tell(new ProcessPartition { Id = "1" });
+                Log.Info($"Partition detected! {message}");                
             });
         }
     }
@@ -83,12 +77,7 @@ namespace classLib
     
         // No need to handle any messages
         protected override void OnReceive(object message)
-        {
-            if(message is PartitionDetected){
-                var actorRef = Context.ActorOf<PartitionActor>($"partition-actor-{message}");
-                actorRef.Tell(new ProcessPartition { Id = message.ToString() });
-                Log.Info($"Partition detected! {message}");
-            }
+        {        
         }
 
         public static Props Props() => Akka.Actor.Props.Create<CollectionSupervisor>();
@@ -106,9 +95,7 @@ namespace classLib
                 Console.WriteLine("x to exit, anything else to poison");
                 var input = Console.ReadLine();
                 while(input != "x") {
-                    //system.ActorSelection("akka://feedprocessor-system/user/collection-supervisor/partition-actor-1").Tell(PoisonPill.Instance);
-                    //system.ActorSelection("/user/collection-supervisor/partition-actor-1*").Tell(PoisonPill.Instance);
-                    system.ActorSelection("/user/collection-supervisor/partition-actor-1*").Tell(new Die());
+                    system.ActorSelection("/user/collection-supervisor/partition-range/partition-actor-1*").Tell(new Die());
                     input = Console.ReadLine();
                 }
             }
