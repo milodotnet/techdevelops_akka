@@ -17,10 +17,47 @@ namespace classLib
         }
     }
 
+    public class ProcessPartition {
+        public string Id {get;set;}
+        public override string ToString(){
+            return Id;
+        }
+    }
+
+    public class PartitionActor : ReceiveActor 
+    {
+        public ILoggingAdapter Log { get; } = Context.GetLogger();
+
+        private DateTime startedAt;
+
+        protected override void PreStart() {
+            Log.Info("I Live!");
+            startedAt = DateTime.Now;
+            Log.Info(startedAt.ToString());
+        }
+
+        protected override void PostStop() => Log.Info("Et e brutus?");
+
+        public PartitionActor(){
+            Receive<ProcessPartition>(message => {
+                Log.Info($"started processing partition {message}");
+            });
+            Receive<Die>(message => {
+                Log.Info($"Die Hard");
+                throw new ArgumentException();
+            });
+        }
+    }
+
+    public class Die{
+
+    }
+
     public class PartitionRangeActor : ReceiveActor
     {
         public ILoggingAdapter Log { get; } = Context.GetLogger();
-    
+                    
+
         public PartitionRangeActor()
         {
             Receive<StartReadingPartitions>(message => {
@@ -48,6 +85,8 @@ namespace classLib
         protected override void OnReceive(object message)
         {
             if(message is PartitionDetected){
+                var actorRef = Context.ActorOf<PartitionActor>($"partition-actor-{message}");
+                actorRef.Tell(new ProcessPartition { Id = message.ToString() });
                 Log.Info($"Partition detected! {message}");
             }
         }
@@ -64,7 +103,14 @@ namespace classLib
                 // Create top level supervisor
                 var supervisor = system.ActorOf(CollectionSupervisor.Props(), "collection-supervisor");
                 // Exit the system after ENTER is pressed
-                Console.ReadLine();
+                Console.WriteLine("x to exit, anything else to poison");
+                var input = Console.ReadLine();
+                while(input != "x") {
+                    //system.ActorSelection("akka://feedprocessor-system/user/collection-supervisor/partition-actor-1").Tell(PoisonPill.Instance);
+                    //system.ActorSelection("/user/collection-supervisor/partition-actor-1*").Tell(PoisonPill.Instance);
+                    system.ActorSelection("/user/collection-supervisor/partition-actor-1*").Tell(new Die());
+                    input = Console.ReadLine();
+                }
             }
         }
     }
