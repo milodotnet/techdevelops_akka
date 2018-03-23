@@ -8,16 +8,26 @@ namespace classLib
     using System.Collections.Generic;
     using System.Globalization;
     using System.Security;
+    using System.Threading.Tasks;
     using Microsoft.Azure.Documents;
     using Microsoft.Azure.Documents.Client;
     using Microsoft.Azure.Documents.Linq;
     using Microsoft.Azure.Documents.Partitioning;
+    using Microsoft.Azure.Documents.SystemFunctions;
 
     public class PartitionActor : ReceiveActor 
     {
         public ILoggingAdapter Log { get; } = Context.GetLogger();
 
         private DateTime _startedAt;
+
+        private readonly DocumentClient _client;
+
+
+        public static Props Props(DocumentClient client)
+        {
+            return Akka.Actor.Props.Create(() => new PartitionActor(client));
+        }
 
         protected override void PreStart() {
             Log.Info("I Live!");
@@ -27,9 +37,44 @@ namespace classLib
 
         protected override void PostStop() => Log.Info("Et e brutus?");
 
-        public PartitionActor(){
+        public PartitionActor(DocumentClient client){
+            _client = client;
             Receive<Message.ProcessPartition>(message => {
                 Log.Info($"started processing partition {message}");
+
+                string continuation = message.ContinueFrom;
+                Dictionary<string, string> checkpoints = new Dictionary<string, string>();
+                checkpoints.TryGetValue(message.Id, out continuation);
+
+                IDocumentQuery<Document> query = _client.CreateDocumentChangeFeedQuery(
+                    message.CollectionUri,
+                    new ChangeFeedOptions
+                    {
+                        PartitionKeyRangeId = message.Id,
+                        StartFromBeginning = true,
+                        RequestContinuation = continuation,
+                        MaxItemCount = 20,
+                        // Set reading time: only show change feed results modified since StartTime
+                        //StartTime = DateTime.Now - TimeSpan.FromSeconds(30)
+                    });
+
+                int numChangesRead = 0;
+                while (query.HasMoreResults)
+                {
+                    Task.Delay(TimeSpan.FromMilliseconds(100)).GetAwaiter().GetResult();
+                    FeedResponse<Document> readChangesResponse = query.ExecuteNextAsync<Document>().Result;
+
+                    foreach (Document changedDocument in readChangesResponse)
+                    {
+                        Console.WriteLine("\tRead document {0} from the change feed.", changedDocument.Id);
+                        numChangesRead++;
+                    }
+
+                    checkpoints[message.Id] = readChangesResponse.ResponseContinuation;
+                }
+                Console.WriteLine("Read {0} documents from the change feed", numChangesRead);
+                Task.Delay(TimeSpan.FromSeconds(3)).GetAwaiter().GetResult();
+                Self.Tell(new Message.ProcessPartition(message.Id, message.CollectionUri, continuation));
             });
             Receive<Die>(message => {
                 Log.Info($"Die Hard");
@@ -77,8 +122,10 @@ namespace classLib
 
                 partitionKeyRanges.ForEach(range =>
                 {
-                    var actorRef = Context.ActorOf<PartitionActor>($"partition-actor-{range.Id}");
-                    actorRef.Tell(new Message.ProcessPartition(range.Id));
+                    IActorRef actorRef = Context.ActorOf(
+                        PartitionActor.Props(client),
+                        $"partition-actor-{range.Id}");
+                    actorRef.Tell(new Message.ProcessPartition(range.Id, collectionUri, null));
                     Log.Info($"Partition detected! {message}");
                 });
             });
