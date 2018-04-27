@@ -35,30 +35,13 @@
                 (persistedMessage) =>
                 {
                     var processPartition = new ProcessPartition(persistedMessage.PartitionId, collectionUri, persistedMessage.Checkpoint);
-                    _partitionActors[persistedMessage.PartitionId].Tell(processPartition);                    
+                    _partitionActors[persistedMessage.PartitionId].Tell(processPartition);
                 }));
 
-            Command<StartReadingPartitions>(unpersistedMessage => Persist(unpersistedMessage, (persistedMessage) => {
-                //start polling to see which partitions exits, and when i find one, send the partition detected message
-                
-                string pkRangesResponseContinuation = null;
-                List<PartitionKeyRange> partitionKeyRanges = new List<PartitionKeyRange>();
-
-                do
-                {
-                    FeedResponse<PartitionKeyRange> pkRangesResponse = client.ReadPartitionKeyRangeFeedAsync(
-                            collectionUri,
-                            new FeedOptions { RequestContinuation = pkRangesResponseContinuation })
-                        .GetAwaiter()
-                        .GetResult();
-
-                    partitionKeyRanges.AddRange(pkRangesResponse);
-                    pkRangesResponseContinuation = pkRangesResponse.ResponseContinuation;
-
-                }
-                while (pkRangesResponseContinuation != null);
-
-                partitionKeyRanges.ForEach(range =>
+            Command<CreatePartitionActors>(cmd =>
+            {
+                Console.WriteLine("Create PartitionActors hit");
+                cmd.PartitionKeyRanges.ForEach(range =>
                 {
                     IActorRef actorRef = Context.ActorOf(
                         PartitionActor.Props(client),
@@ -71,9 +54,38 @@
                     else
                     {
                         actorRef.Tell(new ProcessPartition(range.Id, collectionUri, null));
-                    }                    
-                    Log.Info($"Partition detected! {persistedMessage}");
+                    }
                 });
+            });
+
+            Command<StartReadingPartitions>(unpersistedMessage => Persist(unpersistedMessage, (persistedMessage) =>
+            {
+                //start polling to see which partitions exits, and when i find one, send the partition detected message
+                Console.WriteLine("Start reading partitions received");
+                client?.ReadPartitionKeyRangeFeedAsync(collectionUri, new FeedOptions())
+                    .ContinueWith(pkRangesResponse =>
+                    {
+                        Console.WriteLine("Continuation hit");
+
+                        try
+                        {
+                            var result = pkRangesResponse.Result;
+                            var partitionKeyRanges = new List<PartitionKeyRange>();
+                            partitionKeyRanges.AddRange(result);
+                            Console.WriteLine("sending create partition actors");
+                            Console.WriteLine($"{partitionKeyRanges.Count}");
+                            return new CreatePartitionActors(partitionKeyRanges);
+
+                        }
+                        catch (Exception ex)
+                        {
+                            Console.WriteLine($"{ex.Message}");
+                            return new CreatePartitionActors(new List<PartitionKeyRange>());                            
+                        }
+                    })
+                    .PipeTo(Self);
+
+
             }));
         }
     }
